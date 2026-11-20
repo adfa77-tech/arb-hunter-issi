@@ -1,3 +1,4 @@
+```python
 import os
 import re
 import pandas as pd
@@ -66,7 +67,7 @@ with st.sidebar:
     hanya_uptrend = st.checkbox("Hanya Saham Uptrend (> EMA200)", value=False)
     
     st.divider()
-    api_key_input = st.text_input("Gemini API Key", type="password", value=os.environ.get("GEMINI_API_KEY", ""))
+    api_key_input = st.text_input("API Key AI (Opsional - Groq/Gemini)", type="password", value=os.environ.get("GROQ_API_KEY", ""))
     tombol_scan = st.button("🔍 Mulai Pindai Pasar Sekarang", type="primary", use_container_width=True)
 
 # ================= EKSEKUSI PEMINDAIAN =================
@@ -83,7 +84,7 @@ if tombol_scan:
         st.session_state["hasil_scan"] = df_hasil
         st.session_state["mode_sesi"] = mode_sesi
         
-        if not df_hasil.empty and api_key_input:
+        if not df_hasil.empty:
             with st.spinner("AI sedang membaca berita terbaru & mengevaluasi rasio Risk/Reward..."):
                 st.session_state["analisa_ai"] = generate_analisa_ai(df_hasil, mode_sesi, api_key_input)
         else:
@@ -114,7 +115,7 @@ if "hasil_scan" in st.session_state:
             tv_widget = f"""
             <div class="tradingview-widget-container">
               <div id="tradingview_chart"></div>
-              <script type="text/javascript" src="https://tradingview.com"></script>
+              <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
               <script type="text/javascript">
               new TradingView.widget({{
                 "width": "100%",
@@ -140,7 +141,7 @@ if "hasil_scan" in st.session_state:
             if st.session_state.get("analisa_ai"):
                 st.markdown(st.session_state["analisa_ai"])
             else:
-                st.info("Masukkan **Gemini API Key** di sidebar kiri lalu klik **Mulai Pindai Pasar Sekarang** untuk melihat analisa AI.")
+                st.info("Klik **Mulai Pindai Pasar Sekarang** di sidebar kiri untuk melihat analisa AI.")
             
             with st.expander("📰 Lihat Berita Mentah Emiten"):
                 for _, r in df.iterrows():
