@@ -1,0 +1,9 @@
+tradingview-screener
+google-genai
+requests
+pandas
+feedparser
+openpyxl
+beautifulsoup4
+streamlit
+plotly
