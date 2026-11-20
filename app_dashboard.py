@@ -21,8 +21,8 @@ def ekstrak_kode_dari_file(uploaded_file):
         kode_ditemukan = set()
         for col_name in df_up.columns:
             for val in df_up[col_name].dropna():
-                teks = str(val).strip().upper()
-                if re.fullmatch(r"[A-Z]{4}", teks): # Ambil kode saham 4 huruf (misal: AADI, BRIS)
+                teks = str(val).strip().upper().replace("IDX:", "")
+                if re.fullmatch(r"[A-Z]{4}", teks):
                     kode_ditemukan.add(teks)
         return kode_ditemukan
     except Exception as e:
@@ -48,9 +48,9 @@ with st.sidebar:
     pilihan_mode = st.radio(
         "Mode Strategi:",
         [
-            "SORE (Mentok ARB -20% s/d -35%)",
-            "KOREKSI (Turun Tajam -7% s/d -18%)",
-            "PAGI (Morning Rebound > +1%)"
+            "KOREKSI (Turun Tajam -5% s/d -35%)",
+            "SORE (Mentok ARB -15% s/d -35%)",
+            "PAGI (Morning Rebound > +0.5%)"
         ]
     )
     if "SORE" in pilihan_mode:
@@ -60,9 +60,9 @@ with st.sidebar:
     else:
         mode_sesi = "PAGI"
     
-    min_trx = st.slider("Minimal Transaksi (Miliar Rp)", 1.0, 50.0, 3.0, step=1.0)
-    min_vol = st.slider("Minimal Lonjakan Volume (x Rata-rata)", 0.5, 5.0, 1.2, step=0.1)
-    max_rsi = st.slider("Maksimal RSI (14)", 15, 50, 35)
+    min_trx = st.slider("Minimal Transaksi (Miliar Rp)", 0.5, 50.0, 1.0, step=0.5)
+    min_vol = st.slider("Minimal Lonjakan Volume (x Rata-rata)", 0.5, 5.0, 0.9, step=0.1)
+    max_rsi = st.slider("Maksimal RSI (14)", 15, 60, 45)
     hanya_uptrend = st.checkbox("Hanya Saham Uptrend (> EMA200)", value=False)
     
     st.divider()
@@ -82,13 +82,19 @@ if tombol_scan:
         )
         st.session_state["hasil_scan"] = df_hasil
         st.session_state["mode_sesi"] = mode_sesi
+        
+        if not df_hasil.empty and api_key_input:
+            with st.spinner("AI sedang membaca berita terbaru & mengevaluasi rasio Risk/Reward..."):
+                st.session_state["analisa_ai"] = generate_analisa_ai(df_hasil, mode_sesi, api_key_input)
+        else:
+            st.session_state["analisa_ai"] = None
 
 # ================= TAMPILAN HASIL & CHART =================
 if "hasil_scan" in st.session_state:
     df = st.session_state["hasil_scan"]
     
     if df.empty:
-        st.warning("Belum ada saham ISSI yang memenuhi kriteria saat ini. Coba pilih mode **KOREKSI (-7% s/d -18%)** atau longgarkan filter RSI/Transaksi.")
+        st.warning("Belum ada saham ISSI yang memenuhi kriteria saat ini. Coba longgarkan filter RSI atau Minimal Transaksi.")
     else:
         st.success(f"Ditemukan **{len(df)} kandidat** saham ISSI yang lolos saringan!")
         
@@ -131,12 +137,10 @@ if "hasil_scan" in st.session_state:
 
         with col2:
             st.subheader("🤖 Analisa Strategi & Berita oleh AI")
-            if api_key_input:
-                with st.spinner("AI sedang membaca berita terbaru & mengevaluasi rasio Risk/Reward..."):
-                    analisa = generate_analisa_ai(df, st.session_state["mode_sesi"], api_key_input)
-                    st.markdown(analisa)
+            if st.session_state.get("analisa_ai"):
+                st.markdown(st.session_state["analisa_ai"])
             else:
-                st.info("Masukkan **Gemini API Key** di sidebar kiri untuk mengaktifkan evaluasi berita & strategi otomatis oleh AI.")
+                st.info("Masukkan **Gemini API Key** di sidebar kiri lalu klik **Mulai Pindai Pasar Sekarang** untuk melihat analisa AI.")
             
             with st.expander("📰 Lihat Berita Mentah Emiten"):
                 for _, r in df.iterrows():
