@@ -28,14 +28,10 @@ def bulatkan_fraksi_bei(harga, arah="terdekat"):
 
 # ================= 2. KALKULATOR RISK MANAGEMENT (ATR) =================
 def hitung_risk_management(harga_entry, atr_14):
-    # Jika ATR tidak terbaca, gunakan estimasi 3% dari harga
     atr = atr_14 if (pd.notna(atr_14) and atr_14 > 0) else (harga_entry * 0.03)
-    
-    # Batasi risiko Stop Loss maksimal 3.5% dari harga entry
     jarak_sl = min(atr * 1.0, harga_entry * 0.035)
     sl = bulatkan_fraksi_bei(harga_entry - jarak_sl, "bawah")
     
-    # Pastikan SL minimal 1 fraksi di bawah entry
     if sl >= harga_entry:
         sl = bulatkan_fraksi_bei(harga_entry * 0.98, "bawah")
 
@@ -104,22 +100,20 @@ def jalankan_pemindaian(sesi="SORE", min_transaksi_miliar=5.0, min_vol_ratio=1.5
         'Value.Traded', 'RSI', 'EMA200', 'BB.lower', 'MACD.macd', 'MACD.signal', 'ATR'
     ]
 
+    # Gunakan perbandingan langsung antara kolom dengan angka di dalam .where()
     if sesi == "SORE":
         kondisi = [
             col('close') >= 50,
             col('change') <= -18.5,
             col('Value.Traded') >= min_idr,
-            col('volume') > col('average_volume_10d_calc') * min_vol_ratio,
-            col('RSI') < max_rsi,
-            col('close') <= col('BB.lower') * 1.01
+            col('RSI') < max_rsi
         ]
     else:
         kondisi = [
             col('close') >= 50,
             col('change') >= 1.0,
-            col('Value.Traded') >= (min_idr * 0.2), # 20% target harian di 15 menit awal pembukaan
-            col('RSI') < max_rsi,
-            col('close') <= col('BB.lower') * 1.05
+            col('Value.Traded') >= (min_idr * 0.2),
+            col('RSI') < max_rsi
         ]
 
     _, df = (
@@ -128,17 +122,31 @@ def jalankan_pemindaian(sesi="SORE", min_transaksi_miliar=5.0, min_vol_ratio=1.5
         .select(*kolom)
         .where(*kondisi)
         .order_by('Value.Traded', ascending=False)
-        .limit(100)
+        .limit(150)
         .get_scanner_data()
     )
 
     hasil = []
     for _, row in df.iterrows():
-        kode = row['name'].strip().upper()
+        kode = str(row['name']).strip().upper()
         if kode not in daftar_issi:
             continue
-        if sesi == "SORE" and not is_valid_arb(row['close'], row['change']):
-            continue
+
+        # Filter rasio volume & Bollinger Bands diproses aman di Pandas
+        vol = row.get('volume', 0)
+        avg_vol = row.get('average_volume_10d_calc', 0)
+        bb_lower = row.get('BB.lower', 0)
+
+        if sesi == "SORE":
+            if not is_valid_arb(row['close'], row['change']):
+                continue
+            if pd.notna(avg_vol) and avg_vol > 0 and vol < (avg_vol * min_vol_ratio):
+                continue
+            if pd.notna(bb_lower) and bb_lower > 0 and row['close'] > (bb_lower * 1.02):
+                continue
+        else:
+            if pd.notna(bb_lower) and bb_lower > 0 and row['close'] > (bb_lower * 1.05):
+                continue
 
         ema200 = row.get('EMA200')
         tren = "Uptrend" if (pd.notna(ema200) and row['close'] > ema200) else "Downtrend"
@@ -146,9 +154,10 @@ def jalankan_pemindaian(sesi="SORE", min_transaksi_miliar=5.0, min_vol_ratio=1.5
             continue
 
         rm = hitung_risk_management(row['close'], row.get('ATR'))
-        bb_lower = row.get('BB.lower', 0)
-        jarak_bb = round(((row['close'] - bb_lower) / bb_lower * 100), 2) if bb_lower else 0
-        macd_hist = round(row.get('MACD.macd', 0) - row.get('MACD.signal', 0), 2)
+        jarak_bb = round(((row['close'] - bb_lower) / bb_lower * 100), 2) if (pd.notna(bb_lower) and bb_lower > 0) else 0
+        macd_val = row.get('MACD.macd', 0) if pd.notna(row.get('MACD.macd')) else 0
+        macd_sig = row.get('MACD.signal', 0) if pd.notna(row.get('MACD.signal')) else 0
+        macd_hist = round(macd_val - macd_sig, 2)
 
         hasil.append({
             "Kode": kode,
@@ -176,27 +185,30 @@ def generate_analisa_ai(df_kandidat, sesi, api_key):
     if not api_key or df_kandidat.empty:
         return "API Key Gemini belum diatur atau kandidat kosong."
 
-    client = genai.Client(api_key=api_key)
-    ringkasan = ""
-    for _, r in df_kandidat.iterrows():
-        ringkasan += (
-            f"- {r['Kode']} | Entry: {r['Harga']} ({r['Change (%)']}%) | Transaksi: Rp{r['Transaksi (M)']}M | "
-            f"RSI: {r['RSI']} | BB Lower: {r['Jarak BB (%)']}% | MACD Hist: {r['MACD Hist']} | Tren: {r['Tren']}\n"
-            f"  Plan ATR -> SL: {r['Stop Loss']} (-{r['Risiko (%)']}%) | TP1: {r['TP 1']} (+{r['Profit 1 (%)']}%) | TP2: {r['TP 2']} (+{r['Profit 2 (%)']}%)\n"
-            f"  Berita:\n{r['Berita']}\n\n"
-        )
+    try:
+        client = genai.Client(api_key=api_key.strip())
+        ringkasan = ""
+        for _, r in df_kandidat.iterrows():
+            ringkasan += (
+                f"- {r['Kode']} | Entry: {r['Harga']} ({r['Change (%)']}%) | Transaksi: Rp{r['Transaksi (M)']}M | "
+                f"RSI: {r['RSI']} | BB Lower: {r['Jarak BB (%)']}% | MACD Hist: {r['MACD Hist']} | Tren: {r['Tren']}\n"
+                f"  Plan ATR -> SL: {r['Stop Loss']} (-{r['Risiko (%)']}%) | TP1: {r['TP 1']} (+{r['Profit 1 (%)']}%) | TP2: {r['TP 2']} (+{r['Profit 2 (%)']}%)\n"
+                f"  Berita:\n{r['Berita']}\n\n"
+            )
 
-    prompt = f"""
-    Kamu adalah analis kuantitatif saham syariah (ISSI) BEI spesialis strategi ARB Hunter & 2-Day Rebound.
-    Sesi: {sesi}. Data kandidat beserta level Risk Management berbasis ATR:
+        prompt = f"""
+        Kamu adalah analis kuantitatif saham syariah (ISSI) BEI spesialis strategi ARB Hunter & 2-Day Rebound.
+        Sesi: {sesi}. Data kandidat beserta level Risk Management berbasis ATR:
 
-    {ringkasan}
+        {ringkasan}
 
-    Tugasmu:
-    1. Pilih maksimal 2 saham dengan probabilitas rebound terbaik.
-    2. Validasi sentimen berita: pastikan bukan karena suspensi, PKPU, atau gagal bayar.
-    3. Berikan eksekusi singkat mengacu pada angka Entry, SL, TP1, dan TP2 yang sudah dihitung di atas.
-    Gunakan bahasa Indonesia yang padat dan langsung ke inti (maksimal 220 kata).
-    """
-    resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-    return resp.text
+        Tugasmu:
+        1. Pilih maksimal 2 saham dengan probabilitas rebound terbaik.
+        2. Validasi sentimen berita: pastikan bukan karena suspensi, PKPU, atau gagal bayar.
+        3. Berikan eksekusi singkat mengacu pada angka Entry, SL, TP1, dan TP2 yang sudah dihitung di atas.
+        Gunakan bahasa Indonesia yang padat dan langsung ke inti (maksimal 220 kata).
+        """
+        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        return resp.text
+    except Exception as e:
+        return f"Gagal memuat analisa AI: {e}. Pastikan Anda menggunakan Gemini API Key yang diawali 'AIzaSy...' dari Google AI Studio."
