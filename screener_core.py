@@ -3,6 +3,7 @@ import math
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 import feedparser
+import requests
 import pandas as pd
 from tradingview_screener import Query, col
 from google import genai
@@ -64,7 +65,6 @@ def muat_daftar_issi(custom_set=None):
         return custom_set
     if os.path.exists("daftar_issi.csv"):
         df_issi = pd.read_csv("daftar_issi.csv")
-        # Ambil semua teks 4 huruf kapital dari seluruh kolom agar kebal format CSV apa pun
         kode_set = set()
         for c in df_issi.columns:
             for val in df_issi[c].dropna():
@@ -84,12 +84,18 @@ def muat_daftar_issi(custom_set=None):
         "TLKM", "TOWR", "TPIA", "UNTR", "UNVR", "WIFI", "WIKA"
     }
 
+# Fungsi berita yang sudah diamankan dengan requests + try/except
 def ambil_berita_emiten(kode_saham):
-    query = urllib.parse.quote(f"saham {kode_saham} IDX")
-    rss_url = f"https://google.com{query}&hl=id&gl=ID&ceid=ID:id"
-    feed = feedparser.parse(rss_url)
-    berita = [f"- {e.title}" for e in feed.entries[:3]]
-    return "\n".join(berita) if berita else "- Tidak ada berita besar."
+    try:
+        kode_bersih = "".join(c for c in kode_saham if c.isalnum())
+        query = urllib.parse.quote(f"saham {kode_bersih} IDX")
+        rss_url = f"https://google.com{query}&hl=id&gl=ID&ceid=ID:id"
+        resp = requests.get(rss_url, timeout=5)
+        feed = feedparser.parse(resp.content)
+        berita = [f"- {e.title}" for e in feed.entries[:3] if hasattr(e, "title")]
+        return "\n".join(berita) if berita else "- Tidak ada berita besar."
+    except Exception:
+        return "- Berita tidak dapat dimuat saat ini."
 
 # ================= 4. MESIN PEMINDAI TRADINGVIEW =================
 def jalankan_pemindaian(
@@ -108,8 +114,6 @@ def jalankan_pemindaian(
         'Value.Traded', 'RSI', 'EMA200', 'BB.lower', 'MACD.macd', 'MACD.signal', 'ATR'
     ]
 
-    # Tarik seluruh saham BEI yang aktif diperdagangkan hari ini (> Rp 500 Juta)
-    # lalu lakukan penyaringan presisi di Pandas agar tidak ada filter tersembunyi yang gagal
     _, df = (
         Query()
         .set_markets('indonesia')
@@ -118,7 +122,7 @@ def jalankan_pemindaian(
             col('close') >= 50,
             col('Value.Traded') >= min_idr
         )
-        .order_by('change', ascending=True) # Urutkan dari penurunan paling tajam
+        .order_by('change', ascending=True)
         .limit(1000)
         .get_scanner_data()
     )
@@ -128,7 +132,6 @@ def jalankan_pemindaian(
 
     hasil = []
     for _, row in df.iterrows():
-        # Bersihkan nama ticker (hapus 'IDX:' jika ada)
         kode = str(row['name']).strip().upper().replace("IDX:", "")
         if kode not in daftar_issi:
             continue
@@ -138,29 +141,22 @@ def jalankan_pemindaian(
         vol = row.get('volume', 0)
         avg_vol = row.get('average_volume_10d_calc', 0)
 
-        # 1. Filter berdasarkan Mode Strategi
         if sesi == "SORE":
-            # Saham koreksi ekstrem / mendekati ARB (turun >= 15%)
             if pd.isna(change) or change > -15.0:
                 continue
         elif sesi == "KOREKSI":
-            # Saham koreksi tajam (-5% s/d -35%)
             if pd.isna(change) or change > -5.0:
                 continue
         else:
-            # Mode PAGI: Saham mulai memantul hijau (+0.5% s/d +15%)
             if pd.isna(change) or change < 0.5:
                 continue
 
-        # 2. Filter RSI
         if pd.notna(rsi) and rsi > max_rsi:
             continue
 
-        # 3. Filter Lonjakan Volume
         if pd.notna(avg_vol) and avg_vol > 0 and vol < (avg_vol * min_vol_ratio):
             continue
 
-        # 4. Filter Tren EMA200 (jika dicentang)
         ema200 = row.get('EMA200')
         tren = "Uptrend" if (pd.notna(ema200) and row['close'] > ema200) else "Downtrend"
         if hanya_uptrend and tren != "Uptrend":
@@ -194,7 +190,6 @@ def jalankan_pemindaian(
 
     df_out = pd.DataFrame(hasil)
     if not df_out.empty:
-        # Urutkan berdasarkan penurunan paling tajam (untuk SORE/KOREKSI) atau kenaikan tertinggi (untuk PAGI)
         df_out = df_out.sort_values(by="Change (%)", ascending=(sesi != "PAGI"))
     return df_out
 
@@ -205,7 +200,6 @@ def generate_analisa_ai(df_kandidat, sesi, api_key):
 
     try:
         client = genai.Client(api_key=api_key.strip())
-        # Batasi maksimal 8 saham teratas yang dikirim ke AI agar analisis tajam dan cepat
         df_top = df_kandidat.head(8)
         ringkasan = ""
         for _, r in df_top.iterrows():
