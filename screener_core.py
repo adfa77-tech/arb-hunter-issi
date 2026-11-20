@@ -6,7 +6,6 @@ import feedparser
 import requests
 import pandas as pd
 from tradingview_screener import Query, col
-from google import genai
 
 # ================= 1. PEMBULATAN FRAKSI HARGA BEI =================
 def bulatkan_fraksi_bei(harga, arah="terdekat"):
@@ -192,44 +191,69 @@ def jalankan_pemindaian(
         df_out = df_out.sort_values(by="Change (%)", ascending=(sesi != "PAGI"))
     return df_out
 
-# ================= 5. ANALISIS AI (GEMINI DENGAN AUTO-FALLBACK) =================
-def generate_analisa_ai(df_kandidat, sesi, api_key):
-    if not api_key or df_kandidat.empty:
-        return "API Key Gemini belum diatur atau kandidat kosong."
+# ================= 5. ANALISIS AI MULTI-PROVIDER (ANTI-LIMIT 429) =================
+def generate_analisa_ai(df_kandidat, sesi, api_key=""):
+    if df_kandidat.empty:
+        return "Tidak ada kandidat untuk dianalisis."
 
-    client = genai.Client(api_key=api_key.strip())
-    df_top = df_kandidat.head(8)
+    df_top = df_kandidat.head(6)
     ringkasan = ""
     for _, r in df_top.iterrows():
         ringkasan += (
-            f"- {r['Kode']} | Entry: {r['Harga']} ({r['Change (%)']}%) | Transaksi: Rp{r['Transaksi (M)']}M | "
-            f"RSI: {r['RSI']} | BB Lower: {r['Jarak BB (%)']}% | MACD Hist: {r['MACD Hist']} | Tren: {r['Tren']}\n"
+            f"- {r['Kode']} | Harga: {r['Harga']} ({r['Change (%)']}%) | Transaksi: Rp{r['Transaksi (M)']}M | "
+            f"RSI: {r['RSI']} | BB Lower: {r['Jarak BB (%)']}% | Tren: {r['Tren']}\n"
             f"  Plan ATR -> SL: {r['Stop Loss']} (-{r['Risiko (%)']}%) | TP1: {r['TP 1']} (+{r['Profit 1 (%)']}%) | TP2: {r['TP 2']} (+{r['Profit 2 (%)']}%)\n"
             f"  Berita:\n{r['Berita']}\n\n"
         )
 
-    prompt = f"""
-    Kamu adalah analis kuantitatif saham syariah (ISSI) BEI spesialis strategi ARB Hunter & 2-Day Rebound.
-    Mode Pemindaian: {sesi}. Data kandidat beserta level Risk Management berbasis ATR:
+    prompt = (
+        f"Kamu adalah analis kuantitatif saham syariah (ISSI) BEI spesialis strategi ARB Hunter & 2-Day Rebound.\n"
+        f"Mode Pemindaian: {sesi}.\n"
+        f"Data kandidat:\n{ringkasan}\n"
+        f"Tugas:\n"
+        f"1. Pilih maksimal 2 saham terbaik dengan peluang technical rebound tertinggi (perhatikan RSI rendah, transaksi besar, dan rasio Risk/Reward).\n"
+        f"2. Cek berita: pastikan penurunan bukan karena suspensi, PKPU, atau gagal bayar.\n"
+        f"3. Sebutkan rencana trading singkat (Entry, SL, TP1, TP2) dari data di atas.\n"
+        f"Jawab ringkas dalam bahasa Indonesia (maksimal 200 kata)."
+    )
 
-    {ringkasan}
+    kunci = api_key.strip() if api_key else ""
 
-    Tugasmu:
-    1. Pilih maksimal 2 saham dengan probabilitas rebound terbaik.
-    2. Validasi sentimen berita: pastikan bukan karena suspensi, PKPU, atau gagal bayar.
-    3. Berikan eksekusi singkat mengacu pada angka Entry, SL, TP1, dan TP2 yang sudah dihitung di atas.
-    Gunakan bahasa Indonesia yang padat dan langsung ke inti (maksimal 220 kata).
-    """
-
-    daftar_model = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash"]
-    error_terakhir = ""
-
-    for nama_model in daftar_model:
+    # 1. Jika user memasukkan Groq API Key (gsk_...)
+    if kunci.startswith("gsk_"):
         try:
-            resp = client.models.generate_content(model=nama_model, contents=prompt)
-            return f"*(Dianalisis menggunakan `{nama_model}`)*\n\n{resp.text}"
-        except Exception as e:
-            error_terakhir = str(e)
-            continue
+            resp = requests.post(
+                "https://groq.com",
+                headers={"Authorization": f"Bearer {kunci}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3
+                },
+                timeout=20
+            )
+            if resp.status_code == 200:
+                teks = resp.json()["choices"][0]["message"]["content"]
+                return f"*(Dianalisis oleh Groq Llama-3.3-70B)*\n\n{teks}"
+        except Exception:
+            pass
 
-    return f"Semua model kuota gratis sedang penuh/limit: {error_terakhir}. Tunggu 1 menit lalu klik tombol Pindai ulang."
+    # 2. Jika user memasukkan Gemini API Key (AIza...)
+    if kunci.startswith("AIza"):
+        try:
+            url = f"https://googleapis.com{kunci}"
+            resp = requests.post(
+                url,
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=20
+            )
+            if resp.status_code == 200:
+                teks = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return f"*(Dianalisis oleh Gemini 2.0 Flash)*\n\n{teks}"
+        except Exception:
+            pass
+
+    # 3. Fallback Otomatis Gratis Tanpa API Key (Selalu Berhasil & Anti-429)
+    try:
+        resp = requests.post(
+            "https://pollinations.ai",
