@@ -64,7 +64,15 @@ def muat_daftar_issi(custom_set=None):
         return custom_set
     if os.path.exists("daftar_issi.csv"):
         df_issi = pd.read_csv("daftar_issi.csv")
-        return set(df_issi["Kode"].dropna().str.strip().str.upper())
+        # Ambil semua teks 4 huruf kapital dari seluruh kolom agar kebal format CSV apa pun
+        kode_set = set()
+        for c in df_issi.columns:
+            for val in df_issi[c].dropna():
+                t = str(val).strip().upper().replace("IDX:", "")
+                if len(t) == 4 and t.isalpha():
+                    kode_set.add(t)
+        if len(kode_set) > 0:
+            return kode_set
     return {
         "ADRO", "AKRA", "AMMN", "ANTM", "ASII", "AUTO", "AVIA", "BRIS", "BRMS",
         "BRPT", "BSDE", "BTPS", "CPIN", "CTRA", "DEWA", "DOID", "DSNG", "ELSA",
@@ -76,15 +84,6 @@ def muat_daftar_issi(custom_set=None):
         "TLKM", "TOWR", "TPIA", "UNTR", "UNVR", "WIFI", "WIKA"
     }
 
-def is_valid_arb(harga, change):
-    if 50 <= harga <= 200 and change <= -33.5:
-        return True
-    elif 200 < harga <= 5000 and change <= -23.5:
-        return True
-    elif harga > 5000 and change <= -18.5:
-        return True
-    return False
-
 def ambil_berita_emiten(kode_saham):
     query = urllib.parse.quote(f"saham {kode_saham} IDX")
     rss_url = f"https://google.com{query}&hl=id&gl=ID&ceid=ID:id"
@@ -94,10 +93,10 @@ def ambil_berita_emiten(kode_saham):
 
 # ================= 4. MESIN PEMINDAI TRADINGVIEW =================
 def jalankan_pemindaian(
-    sesi="SORE",
-    min_transaksi_miliar=5.0,
-    min_vol_ratio=1.5,
-    max_rsi=35,
+    sesi="KOREKSI",
+    min_transaksi_miliar=1.0,
+    min_vol_ratio=0.9,
+    max_rsi=45,
     hanya_uptrend=False,
     custom_issi_set=None
 ):
@@ -105,76 +104,70 @@ def jalankan_pemindaian(
     min_idr = min_transaksi_miliar * 1_000_000_000
 
     kolom = [
-        'name', 'close', 'high', 'change', 'volume', 'average_volume_10d_calc',
+        'name', 'close', 'change', 'volume', 'average_volume_10d_calc',
         'Value.Traded', 'RSI', 'EMA200', 'BB.lower', 'MACD.macd', 'MACD.signal', 'ATR'
     ]
 
-    if sesi == "SORE":
-        # Mode 1: Khusus saham mentok ARB
-        kondisi = [
-            col('close') >= 50,
-            col('change') <= -18.5,
-            col('Value.Traded') >= min_idr,
-            col('RSI') < max_rsi
-        ]
-    elif sesi == "KOREKSI":
-        # Mode 2: Koreksi tajam -7% s/d -18.5% (peluang rebound 2 harian)
-        kondisi = [
-            col('close') >= 50,
-            col('change') <= -7.0,
-            col('change') > -18.5,
-            col('Value.Traded') >= min_idr,
-            col('RSI') < max_rsi
-        ]
-    else:
-        # Mode 3: Pantulan Pagi (Morning Bounce)
-        kondisi = [
-            col('close') >= 50,
-            col('change') >= 1.0,
-            col('Value.Traded') >= (min_idr * 0.2),
-            col('RSI') < max_rsi
-        ]
-
+    # Tarik seluruh saham BEI yang aktif diperdagangkan hari ini (> Rp 500 Juta)
+    # lalu lakukan penyaringan presisi di Pandas agar tidak ada filter tersembunyi yang gagal
     _, df = (
         Query()
         .set_markets('indonesia')
         .select(*kolom)
-        .where(*kondisi)
-        .order_by('Value.Traded', ascending=False)
-        .limit(1000) # Memastikan seluruh emiten IDX terambil tanpa terpotong
+        .where(
+            col('close') >= 50,
+            col('Value.Traded') >= min_idr
+        )
+        .order_by('change', ascending=True) # Urutkan dari penurunan paling tajam
+        .limit(1000)
         .get_scanner_data()
     )
 
+    if df is None or df.empty:
+        return pd.DataFrame()
+
     hasil = []
     for _, row in df.iterrows():
-        kode = str(row['name']).strip().upper()
+        # Bersihkan nama ticker (hapus 'IDX:' jika ada)
+        kode = str(row['name']).strip().upper().replace("IDX:", "")
         if kode not in daftar_issi:
             continue
 
+        change = row.get('change', 0)
+        rsi = row.get('RSI', 50)
         vol = row.get('volume', 0)
         avg_vol = row.get('average_volume_10d_calc', 0)
-        bb_lower = row.get('BB.lower', 0)
 
+        # 1. Filter berdasarkan Mode Strategi
         if sesi == "SORE":
-            if not is_valid_arb(row['close'], row['change']):
-                continue
-            if pd.notna(avg_vol) and avg_vol > 0 and vol < (avg_vol * min_vol_ratio):
+            # Saham koreksi ekstrem / mendekati ARB (turun >= 15%)
+            if pd.isna(change) or change > -15.0:
                 continue
         elif sesi == "KOREKSI":
-            if pd.notna(avg_vol) and avg_vol > 0 and vol < (avg_vol * min_vol_ratio):
-                continue
-            if pd.notna(bb_lower) and bb_lower > 0 and row['close'] > (bb_lower * 1.04):
+            # Saham koreksi tajam (-5% s/d -35%)
+            if pd.isna(change) or change > -5.0:
                 continue
         else:
-            if pd.notna(bb_lower) and bb_lower > 0 and row['close'] > (bb_lower * 1.06):
+            # Mode PAGI: Saham mulai memantul hijau (+0.5% s/d +15%)
+            if pd.isna(change) or change < 0.5:
                 continue
 
+        # 2. Filter RSI
+        if pd.notna(rsi) and rsi > max_rsi:
+            continue
+
+        # 3. Filter Lonjakan Volume
+        if pd.notna(avg_vol) and avg_vol > 0 and vol < (avg_vol * min_vol_ratio):
+            continue
+
+        # 4. Filter Tren EMA200 (jika dicentang)
         ema200 = row.get('EMA200')
         tren = "Uptrend" if (pd.notna(ema200) and row['close'] > ema200) else "Downtrend"
         if hanya_uptrend and tren != "Uptrend":
             continue
 
         rm = hitung_risk_management(row['close'], row.get('ATR'))
+        bb_lower = row.get('BB.lower', 0)
         jarak_bb = round(((row['close'] - bb_lower) / bb_lower * 100), 2) if (pd.notna(bb_lower) and bb_lower > 0) else 0
         macd_val = row.get('MACD.macd', 0) if pd.notna(row.get('MACD.macd')) else 0
         macd_sig = row.get('MACD.signal', 0) if pd.notna(row.get('MACD.signal')) else 0
@@ -183,9 +176,9 @@ def jalankan_pemindaian(
         hasil.append({
             "Kode": kode,
             "Harga": rm["Entry"],
-            "Change (%)": round(row['change'], 2),
+            "Change (%)": round(change, 2),
             "Transaksi (M)": round(row['Value.Traded'] / 1e9, 2),
-            "RSI": round(row['RSI'], 1),
+            "RSI": round(rsi, 1) if pd.notna(rsi) else 0,
             "Jarak BB (%)": jarak_bb,
             "MACD Hist": macd_hist,
             "Tren": tren,
@@ -199,7 +192,11 @@ def jalankan_pemindaian(
             "Berita": ambil_berita_emiten(kode)
         })
 
-    return pd.DataFrame(hasil)
+    df_out = pd.DataFrame(hasil)
+    if not df_out.empty:
+        # Urutkan berdasarkan penurunan paling tajam (untuk SORE/KOREKSI) atau kenaikan tertinggi (untuk PAGI)
+        df_out = df_out.sort_values(by="Change (%)", ascending=(sesi != "PAGI"))
+    return df_out
 
 # ================= 5. ANALISIS AI (GEMINI) =================
 def generate_analisa_ai(df_kandidat, sesi, api_key):
@@ -208,8 +205,10 @@ def generate_analisa_ai(df_kandidat, sesi, api_key):
 
     try:
         client = genai.Client(api_key=api_key.strip())
+        # Batasi maksimal 8 saham teratas yang dikirim ke AI agar analisis tajam dan cepat
+        df_top = df_kandidat.head(8)
         ringkasan = ""
-        for _, r in df_kandidat.iterrows():
+        for _, r in df_top.iterrows():
             ringkasan += (
                 f"- {r['Kode']} | Entry: {r['Harga']} ({r['Change (%)']}%) | Transaksi: Rp{r['Transaksi (M)']}M | "
                 f"RSI: {r['RSI']} | BB Lower: {r['Jarak BB (%)']}% | MACD Hist: {r['MACD Hist']} | Tren: {r['Tren']}\n"
