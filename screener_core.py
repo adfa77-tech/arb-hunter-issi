@@ -84,7 +84,6 @@ def muat_daftar_issi(custom_set=None):
         "TLKM", "TOWR", "TPIA", "UNTR", "UNVR", "WIFI", "WIKA"
     }
 
-# Fungsi berita yang sudah diamankan dengan requests + try/except
 def ambil_berita_emiten(kode_saham):
     try:
         kode_bersih = "".join(c for c in kode_saham if c.isalnum())
@@ -193,36 +192,44 @@ def jalankan_pemindaian(
         df_out = df_out.sort_values(by="Change (%)", ascending=(sesi != "PAGI"))
     return df_out
 
-# ================= 5. ANALISIS AI (GEMINI) =================
+# ================= 5. ANALISIS AI (GEMINI DENGAN AUTO-FALLBACK) =================
 def generate_analisa_ai(df_kandidat, sesi, api_key):
     if not api_key or df_kandidat.empty:
         return "API Key Gemini belum diatur atau kandidat kosong."
 
-    try:
-        client = genai.Client(api_key=api_key.strip())
-        df_top = df_kandidat.head(8)
-        ringkasan = ""
-        for _, r in df_top.iterrows():
-            ringkasan += (
-                f"- {r['Kode']} | Entry: {r['Harga']} ({r['Change (%)']}%) | Transaksi: Rp{r['Transaksi (M)']}M | "
-                f"RSI: {r['RSI']} | BB Lower: {r['Jarak BB (%)']}% | MACD Hist: {r['MACD Hist']} | Tren: {r['Tren']}\n"
-                f"  Plan ATR -> SL: {r['Stop Loss']} (-{r['Risiko (%)']}%) | TP1: {r['TP 1']} (+{r['Profit 1 (%)']}%) | TP2: {r['TP 2']} (+{r['Profit 2 (%)']}%)\n"
-                f"  Berita:\n{r['Berita']}\n\n"
-            )
+    client = genai.Client(api_key=api_key.strip())
+    df_top = df_kandidat.head(8)
+    ringkasan = ""
+    for _, r in df_top.iterrows():
+        ringkasan += (
+            f"- {r['Kode']} | Entry: {r['Harga']} ({r['Change (%)']}%) | Transaksi: Rp{r['Transaksi (M)']}M | "
+            f"RSI: {r['RSI']} | BB Lower: {r['Jarak BB (%)']}% | MACD Hist: {r['MACD Hist']} | Tren: {r['Tren']}\n"
+            f"  Plan ATR -> SL: {r['Stop Loss']} (-{r['Risiko (%)']}%) | TP1: {r['TP 1']} (+{r['Profit 1 (%)']}%) | TP2: {r['TP 2']} (+{r['Profit 2 (%)']}%)\n"
+            f"  Berita:\n{r['Berita']}\n\n"
+        )
 
-        prompt = f"""
-        Kamu adalah analis kuantitatif saham syariah (ISSI) BEI spesialis strategi ARB Hunter & 2-Day Rebound.
-        Mode Pemindaian: {sesi}. Data kandidat beserta level Risk Management berbasis ATR:
+    prompt = f"""
+    Kamu adalah analis kuantitatif saham syariah (ISSI) BEI spesialis strategi ARB Hunter & 2-Day Rebound.
+    Mode Pemindaian: {sesi}. Data kandidat beserta level Risk Management berbasis ATR:
 
-        {ringkasan}
+    {ringkasan}
 
-        Tugasmu:
-        1. Pilih maksimal 2 saham dengan probabilitas rebound terbaik.
-        2. Validasi sentimen berita: pastikan bukan karena suspensi, PKPU, atau gagal bayar.
-        3. Berikan eksekusi singkat mengacu pada angka Entry, SL, TP1, dan TP2 yang sudah dihitung di atas.
-        Gunakan bahasa Indonesia yang padat dan langsung ke inti (maksimal 220 kata).
-        """
-        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-        return resp.text
-    except Exception as e:
-        return f"Gagal memuat analisa AI: {e}"
+    Tugasmu:
+    1. Pilih maksimal 2 saham dengan probabilitas rebound terbaik.
+    2. Validasi sentimen berita: pastikan bukan karena suspensi, PKPU, atau gagal bayar.
+    3. Berikan eksekusi singkat mengacu pada angka Entry, SL, TP1, dan TP2 yang sudah dihitung di atas.
+    Gunakan bahasa Indonesia yang padat dan langsung ke inti (maksimal 220 kata).
+    """
+
+    daftar_model = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash"]
+    error_terakhir = ""
+
+    for nama_model in daftar_model:
+        try:
+            resp = client.models.generate_content(model=nama_model, contents=prompt)
+            return f"*(Dianalisis menggunakan `{nama_model}`)*\n\n{resp.text}"
+        except Exception as e:
+            error_terakhir = str(e)
+            continue
+
+    return f"Semua model kuota gratis sedang penuh/limit: {error_terakhir}. Tunggu 1 menit lalu klik tombol Pindai ulang."
